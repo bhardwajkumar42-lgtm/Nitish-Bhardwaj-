@@ -1,0 +1,60 @@
+const express = require("express");
+const { query } = require("../db");
+const { verifyToken } = require("../middleware/auth");
+const { asyncHandler, ApiError } = require("../middleware/errorHandler");
+
+const router = express.Router();
+
+// Planning-range commission rates from spec section 20 — adjust after pilot data.
+const PRODUCT_COMMISSION_PCT = 5;
+const SERVICE_COMMISSION_PCT = 10;
+
+/**
+ * POST /api/payments
+ * body: { order_id? , booking_id?, amount, method }
+ * This is a record-keeping endpoint for the MVP — it does not integrate a
+ * real payment gateway yet. Wire in a UPI/PG provider here before launch,
+ * and only mark status 'paid' after the gateway confirms.
+ */
+router.post(
+  "/",
+  verifyToken,
+  asyncHandler(async (req, res) => {
+    const { order_id, booking_id, amount, method } = req.body;
+    if (!amount || (!order_id && !booking_id)) {
+      throw new ApiError(400, "amount और order_id या booking_id आवश्यक है");
+    }
+
+    const { rows } = await query(
+      `INSERT INTO payments (order_id, booking_id, amount, method, status)
+       VALUES ($1,$2,$3,$4,'paid') RETURNING *`,
+      [order_id || null, booking_id || null, amount, method || "upi"]
+    );
+    const payment = rows[0];
+
+    const pct = order_id ? PRODUCT_COMMISSION_PCT : SERVICE_COMMISSION_PCT;
+    const commissionAmount = Number(((amount * pct) / 100).toFixed(2));
+    await query(
+      `INSERT INTO commissions (payment_id, percentage, amount) VALUES ($1,$2,$3)`,
+      [payment.id, pct, commissionAmount]
+    );
+
+    if (order_id) {
+      await query("UPDATE orders SET payment_status = 'paid' WHERE id = $1", [order_id]);
+    }
+
+    res.status(201).json({ payment, commission: { percentage: pct, amount: commissionAmount } });
+  })
+);
+
+router.get(
+  "/:id",
+  verifyToken,
+  asyncHandler(async (req, res) => {
+    const { rows } = await query("SELECT * FROM payments WHERE id = $1", [req.params.id]);
+    if (!rows[0]) throw new ApiError(404, "Payment not found");
+    res.json({ payment: rows[0] });
+  })
+);
+
+module.exports = router;

@@ -1,0 +1,76 @@
+const express = require("express");
+const { query, getClient } = require("../db");
+const { verifyToken } = require("../middleware/auth");
+const { asyncHandler, ApiError } = require("../middleware/errorHandler");
+
+const router = express.Router();
+
+/**
+ * POST /api/reviews
+ * body: { seller_id? , provider_id?, order_id?, booking_id?, rating, comment }
+ * Recomputes the target's average rating after inserting.
+ */
+router.post(
+  "/",
+  verifyToken,
+  asyncHandler(async (req, res) => {
+    const { seller_id, provider_id, order_id, booking_id, rating, comment } = req.body;
+    if (!rating || rating < 1 || rating > 5) throw new ApiError(400, "rating 1-5 के बीच होनी चाहिए");
+    if (!seller_id && !provider_id) throw new ApiError(400, "seller_id या provider_id आवश्यक है");
+
+    const client = await getClient();
+    try {
+      await client.query("BEGIN");
+      const { rows } = await client.query(
+        `INSERT INTO reviews (customer_id, seller_id, provider_id, order_id, booking_id, rating, comment)
+         VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+        [req.user.id, seller_id || null, provider_id || null, order_id || null, booking_id || null, rating, comment || null]
+      );
+
+      if (seller_id) {
+        await client.query(
+          `UPDATE sellers SET rating = (SELECT ROUND(AVG(rating)::numeric, 1) FROM reviews WHERE seller_id = $1)
+           WHERE id = $1`,
+          [seller_id]
+        );
+      }
+      if (provider_id) {
+        await client.query(
+          `UPDATE service_providers SET rating = (SELECT ROUND(AVG(rating)::numeric, 1) FROM reviews WHERE provider_id = $1)
+           WHERE id = $1`,
+          [provider_id]
+        );
+      }
+
+      await client.query("COMMIT");
+      res.status(201).json({ review: rows[0] });
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+  })
+);
+
+/** GET /api/reviews?seller_id=&provider_id= */
+router.get(
+  "/",
+  asyncHandler(async (req, res) => {
+    const { seller_id, provider_id } = req.query;
+    if (!seller_id && !provider_id) throw new ApiError(400, "seller_id या provider_id दें");
+
+    const column = seller_id ? "seller_id" : "provider_id";
+    const value = seller_id || provider_id;
+
+    const { rows } = await query(
+      `SELECT r.*, u.name AS customer_name FROM reviews r
+       JOIN users u ON u.id = r.customer_id
+       WHERE r.${column} = $1 ORDER BY r.created_at DESC`,
+      [value]
+    );
+    res.json({ reviews: rows });
+  })
+);
+
+module.exports = router;

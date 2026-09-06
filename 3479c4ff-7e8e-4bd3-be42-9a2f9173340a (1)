@@ -1,0 +1,38 @@
+const express = require("express");
+const { query } = require("../db");
+const { asyncHandler } = require("../middleware/errorHandler");
+
+const router = express.Router();
+
+router.get(
+  "/products",
+  asyncHandler(async (req, res) => {
+    const { rows } = await query(
+      "SELECT id, code, name_hi, name_en, emoji FROM product_categories ORDER BY id"
+    );
+    res.json({ categories: rows });
+  })
+);
+
+router.get(
+  "/services",
+  asyncHandler(async (req, res) => {
+    const { rows } = await query(
+      "SELECT id, code, name_hi, name_en, emoji FROM service_categories ORDER BY id"
+    );
+    res.json({ categories: rows });
+  })
+);
+
+router.get(
+  "/services/:id/skills",
+  asyncHandler(async (req, res) => {
+    const { rows } = await query(
+      "SELECT id, name FROM skills WHERE service_category_id = $1 ORDER BY id",
+      [req.params.id]
+    );
+    res.json({ skills: rows });
+  })
+);
+
+module.exports = router;

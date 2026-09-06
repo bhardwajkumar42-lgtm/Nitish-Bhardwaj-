@@ -1,0 +1,59 @@
+require("dotenv").config();
+const express = require("express");
+const cors = require("cors");
+const morgan = require("morgan");
+
+const { errorHandler, notFoundHandler } = require("./middleware/errorHandler");
+
+const authRoutes = require("./routes/auth");
+const userRoutes = require("./routes/users");
+const panchayatRoutes = require("./routes/panchayats");
+const sellerRoutes = require("./routes/sellers");
+const productRoutes = require("./routes/products");
+const categoryRoutes = require("./routes/categories");
+const providerRoutes = require("./routes/providers");
+const orderRoutes = require("./routes/orders");
+const bookingRoutes = require("./routes/bookings");
+const paymentRoutes = require("./routes/payments");
+const deliveryRoutes = require("./routes/delivery");
+const chatRoutes = require("./routes/chat");
+const reviewRoutes = require("./routes/reviews");
+const notificationRoutes = require("./routes/notifications");
+const adminRoutes = require("./routes/admin");
+
+const app = express();
+
+app.use(cors({ origin: process.env.CORS_ORIGIN === "*" ? true : process.env.CORS_ORIGIN?.split(",") }));
+app.use(express.json({ limit: "5mb" }));
+app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
+
+app.get("/health", (req, res) => res.json({ status: "ok", time: new Date().toISOString() }));
+
+// API structure matches spec section 26
+app.use("/api/auth", authRoutes);
+app.use("/api/users", userRoutes);
+app.use("/api/panchayats", panchayatRoutes);
+app.use("/api/sellers", sellerRoutes);
+app.use("/api/products", productRoutes);
+app.use("/api/categories", categoryRoutes);
+app.use("/api/services", categoryRoutes); // service categories/skills share the same router
+app.use("/api/providers", providerRoutes);
+app.use("/api/orders", orderRoutes);
+app.use("/api/bookings", bookingRoutes);
+app.use("/api/payments", paymentRoutes);
+app.use("/api/delivery", deliveryRoutes);
+app.use("/api/chat", chatRoutes);
+app.use("/api/reviews", reviewRoutes);
+app.use("/api/notifications", notificationRoutes);
+app.use("/api/admin", adminRoutes);
+
+app.use(notFoundHandler);
+app.use(errorHandler);
+
+const PORT = process.env.PORT || 4000;
+app.listen(PORT, () => {
+  // eslint-disable-next-line no-console
+  console.log(`🛒 Desi Market backend running on http://localhost:${PORT}`);
+});
+
+module.exports = app;

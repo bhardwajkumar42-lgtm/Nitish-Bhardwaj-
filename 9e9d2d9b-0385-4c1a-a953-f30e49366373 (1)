@@ -1,0 +1,101 @@
+const express = require("express");
+const { query } = require("../db");
+const { verifyToken, requireRole } = require("../middleware/auth");
+const { asyncHandler, ApiError } = require("../middleware/errorHandler");
+
+const router = express.Router();
+
+router.use(verifyToken, requireRole("admin"));
+
+/** GET /api/admin/dashboard — matches spec section 18's dashboard metrics */
+router.get(
+  "/dashboard",
+  asyncHandler(async (req, res) => {
+    const [
+      { rows: userCounts },
+      { rows: sellerCounts },
+      { rows: workerCounts },
+      { rows: orderStats },
+      { rows: bookingStats },
+      { rows: commissionStats },
+    ] = await Promise.all([
+      query("SELECT COUNT(*)::int AS total FROM users WHERE role = 'customer'"),
+      query("SELECT COUNT(*)::int AS total FROM sellers WHERE status = 'live'"),
+      query("SELECT COUNT(*)::int AS total FROM service_providers WHERE status = 'live'"),
+      query(
+        `SELECT COUNT(*)::int AS total, COALESCE(SUM(total_amount) FILTER (WHERE status <> 'cancelled'), 0) AS gmv
+         FROM orders`
+      ),
+      query(
+        `SELECT COUNT(*)::int AS total, COALESCE(SUM(final_amount) FILTER (WHERE status = 'completed'), 0) AS gmv
+         FROM bookings`
+      ),
+      query("SELECT COALESCE(SUM(amount), 0) AS total FROM commissions"),
+    ]);
+
+    res.json({
+      users: userCounts[0].total,
+      sellers: sellerCounts[0].total,
+      workers: workerCounts[0].total,
+      orders: orderStats[0].total,
+      bookings: bookingStats[0].total,
+      product_gmv: Number(orderStats[0].gmv),
+      service_gmv: Number(bookingStats[0].gmv),
+      commission_revenue: Number(commissionStats[0].total),
+    });
+  })
+);
+
+/** GET /api/admin/verifications?status=pending — KYC queue for sellers/workers */
+router.get(
+  "/verifications",
+  asyncHandler(async (req, res) => {
+    const status = req.query.status || "pending";
+    const { rows } = await query(
+      `SELECT v.*, u.name, u.mobile, u.role FROM verifications v
+       JOIN users u ON u.id = v.user_id
+       WHERE v.status = $1 ORDER BY v.created_at ASC`,
+      [status]
+    );
+    res.json({ verifications: rows });
+  })
+);
+
+/** PATCH /api/admin/verifications/:id — approve or reject a KYC submission */
+router.patch(
+  "/verifications/:id",
+  asyncHandler(async (req, res) => {
+    const { status } = req.body;
+    if (!["verified", "rejected"].includes(status)) throw new ApiError(400, "अमान्य status");
+
+    const { rows } = await query(
+      `UPDATE verifications SET status = $1, reviewed_by = $2 WHERE id = $3 RETURNING *`,
+      [status, req.user.id, req.params.id]
+    );
+    const verification = rows[0];
+    if (!verification) throw new ApiError(404, "Verification not found");
+
+    await query("UPDATE users SET kyc_status = $1 WHERE id = $2", [status, verification.user_id]);
+    if (status === "verified") {
+      await query("UPDATE sellers SET status = 'live', is_verified = true WHERE user_id = $1", [
+        verification.user_id,
+      ]);
+      await query(
+        "UPDATE service_providers SET status = 'live', is_verified = true WHERE user_id = $1",
+        [verification.user_id]
+      );
+    }
+
+    res.json({ verification });
+  })
+);
+
+/** GET /api/admin/complaints — placeholder list; extend with a real complaints table when needed */
+router.get(
+  "/complaints",
+  asyncHandler(async (req, res) => {
+    res.json({ complaints: [], note: "Complaints table not yet modeled — add one when the flow is defined." });
+  })
+);
+
+module.exports = router;

@@ -1,0 +1,160 @@
+const express = require("express");
+const { query } = require("../db");
+const { verifyToken } = require("../middleware/auth");
+const { asyncHandler, ApiError } = require("../middleware/errorHandler");
+
+const router = express.Router();
+
+/**
+ * POST /api/bookings
+ * body: { provider_id, scheduled_date, scheduled_slot, problem_description, photo_url, location_text }
+ * Follows the flow in spec section 10: customer picks service -> location ->
+ * date/time -> requirement -> optional photo -> request sent to provider.
+ */
+router.post(
+  "/",
+  verifyToken,
+  asyncHandler(async (req, res) => {
+    const { provider_id, scheduled_date, scheduled_slot, problem_description, photo_url, location_text } =
+      req.body;
+    if (!provider_id) throw new ApiError(400, "provider_id आवश्यक है");
+
+    const { rows: providerRows } = await query(
+      "SELECT * FROM service_providers WHERE id = $1 AND status = 'live'",
+      [provider_id]
+    );
+    if (!providerRows[0]) throw new ApiError(404, "Provider not found or not live");
+
+    const { rows } = await query(
+      `INSERT INTO bookings
+        (customer_id, provider_id, scheduled_date, scheduled_slot, problem_description, photo_url, location_text, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'requested') RETURNING *`,
+      [
+        req.user.id,
+        provider_id,
+        scheduled_date || null,
+        scheduled_slot || null,
+        problem_description || null,
+        photo_url || null,
+        location_text || null,
+      ]
+    );
+
+    await query(
+      `INSERT INTO notifications (user_id, title, body, type)
+       SELECT sp.user_id, 'नई बुकिंग रिक्वेस्ट', 'बुकिंग #' || $1 || ' स्वीकार करें', 'booking'
+       FROM service_providers sp WHERE sp.id = $2`,
+      [rows[0].id, provider_id]
+    );
+
+    res.status(201).json({ booking: rows[0] });
+  })
+);
+
+/** GET /api/bookings?role=provider — list bookings for the logged-in user */
+router.get(
+  "/",
+  verifyToken,
+  asyncHandler(async (req, res) => {
+    const asProvider = req.query.role === "provider";
+    let rows;
+    if (asProvider) {
+      ({ rows } = await query(
+        `SELECT b.* FROM bookings b
+         JOIN service_providers sp ON sp.id = b.provider_id
+         WHERE sp.user_id = $1 ORDER BY b.created_at DESC`,
+        [req.user.id]
+      ));
+    } else {
+      ({ rows } = await query(
+        "SELECT * FROM bookings WHERE customer_id = $1 ORDER BY created_at DESC",
+        [req.user.id]
+      ));
+    }
+    res.json({ bookings: rows });
+  })
+);
+
+router.get(
+  "/:id",
+  verifyToken,
+  asyncHandler(async (req, res) => {
+    const { rows } = await query("SELECT * FROM bookings WHERE id = $1", [req.params.id]);
+    if (!rows[0]) throw new ApiError(404, "Booking not found");
+
+    const { rows: quotes } = await query(
+      "SELECT * FROM booking_quotes WHERE booking_id = $1 ORDER BY amount ASC",
+      [req.params.id]
+    );
+    res.json({ booking: rows[0], quotes });
+  })
+);
+
+/**
+ * PATCH /api/bookings/:id/status
+ * Provider moves the booking through: accepted -> on_the_way -> started -> completed
+ * (or cancelled). Mirrors the lifecycle in spec section 10.
+ */
+router.patch(
+  "/:id/status",
+  verifyToken,
+  asyncHandler(async (req, res) => {
+    const { status, final_amount } = req.body;
+    const allowed = ["accepted", "on_the_way", "started", "completed", "cancelled"];
+    if (!allowed.includes(status)) throw new ApiError(400, "अमान्य status");
+
+    const { rows: bookingRows } = await query(
+      `SELECT b.*, sp.user_id AS provider_user_id FROM bookings b
+       JOIN service_providers sp ON sp.id = b.provider_id WHERE b.id = $1`,
+      [req.params.id]
+    );
+    const booking = bookingRows[0];
+    if (!booking) throw new ApiError(404, "Booking not found");
+    if (booking.provider_user_id !== req.user.id && req.user.role !== "admin") {
+      throw new ApiError(403, "आप इस बुकिंग को नहीं बदल सकते");
+    }
+
+    const { rows } = await query(
+      `UPDATE bookings SET status = $1, final_amount = COALESCE($2, final_amount)
+       WHERE id = $3 RETURNING *`,
+      [status, final_amount || null, req.params.id]
+    );
+
+    if (status === "completed") {
+      await query(
+        "UPDATE service_providers SET jobs_completed = jobs_completed + 1 WHERE id = $1",
+        [booking.provider_id]
+      );
+    }
+
+    await query(
+      `INSERT INTO notifications (user_id, title, body, type)
+       VALUES ($1, 'बुकिंग अपडेट', 'आपकी बुकिंग अब: ' || $2, 'booking')`,
+      [booking.customer_id, status]
+    );
+
+    res.json({ booking: rows[0] });
+  })
+);
+
+/**
+ * POST /api/bookings/:id/quotes — quotation model from spec section 11.
+ * Multiple providers can submit a quote for a large job; the customer compares.
+ */
+router.post(
+  "/:id/quotes",
+  verifyToken,
+  asyncHandler(async (req, res) => {
+    const { provider_id, amount, note } = req.body;
+    if (!provider_id || !amount) throw new ApiError(400, "provider_id और amount आवश्यक हैं");
+
+    const { rows } = await query(
+      `INSERT INTO booking_quotes (booking_id, provider_id, amount, note)
+       VALUES ($1,$2,$3,$4) RETURNING *`,
+      [req.params.id, provider_id, amount, note || null]
+    );
+    res.status(201).json({ quote: rows[0] });
+  })
+);
+
+module.exports = router;

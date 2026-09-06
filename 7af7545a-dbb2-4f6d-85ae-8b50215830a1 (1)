@@ -1,0 +1,68 @@
+const express = require("express");
+const { query } = require("../db");
+const { verifyToken } = require("../middleware/auth");
+const { asyncHandler, ApiError } = require("../middleware/errorHandler");
+
+const router = express.Router();
+
+/** GET /api/delivery — list this delivery partner's assignments */
+router.get(
+  "/",
+  verifyToken,
+  asyncHandler(async (req, res) => {
+    const { rows } = await query(
+      "SELECT * FROM deliveries WHERE delivery_partner_id = $1 ORDER BY created_at DESC",
+      [req.user.id]
+    );
+    res.json({ deliveries: rows });
+  })
+);
+
+/** POST /api/delivery — admin/seller assigns an order to a delivery partner */
+router.post(
+  "/",
+  verifyToken,
+  asyncHandler(async (req, res) => {
+    const { order_id, delivery_partner_id, pickup_address, drop_address, distance_km, earning } = req.body;
+    if (!order_id || !delivery_partner_id) {
+      throw new ApiError(400, "order_id और delivery_partner_id आवश्यक हैं");
+    }
+    const { rows } = await query(
+      `INSERT INTO deliveries (order_id, delivery_partner_id, pickup_address, drop_address, distance_km, earning, status)
+       VALUES ($1,$2,$3,$4,$5,$6,'new') RETURNING *`,
+      [order_id, delivery_partner_id, pickup_address || null, drop_address || null, distance_km || null, earning || null]
+    );
+    res.status(201).json({ delivery: rows[0] });
+  })
+);
+
+/** PATCH /api/delivery/:id/status — new -> accepted -> picked_up -> on_the_way -> delivered */
+router.patch(
+  "/:id/status",
+  verifyToken,
+  asyncHandler(async (req, res) => {
+    const { status } = req.body;
+    const allowed = ["accepted", "picked_up", "on_the_way", "delivered"];
+    if (!allowed.includes(status)) throw new ApiError(400, "अमान्य status");
+
+    const { rows: existing } = await query("SELECT * FROM deliveries WHERE id = $1", [req.params.id]);
+    const delivery = existing[0];
+    if (!delivery) throw new ApiError(404, "Delivery not found");
+    if (delivery.delivery_partner_id !== req.user.id && req.user.role !== "admin") {
+      throw new ApiError(403, "आप इस डिलीवरी को नहीं बदल सकते");
+    }
+
+    const { rows } = await query(
+      "UPDATE deliveries SET status = $1 WHERE id = $2 RETURNING *",
+      [status, req.params.id]
+    );
+    if (status === "delivered") {
+      await query("UPDATE orders SET status = 'delivered' WHERE id = $1", [delivery.order_id]);
+    } else if (status === "on_the_way") {
+      await query("UPDATE orders SET status = 'out_for_delivery' WHERE id = $1", [delivery.order_id]);
+    }
+    res.json({ delivery: rows[0] });
+  })
+);
+
+module.exports = router;

@@ -1,0 +1,154 @@
+const express = require("express");
+const { query, getClient } = require("../db");
+const { verifyToken } = require("../middleware/auth");
+const { asyncHandler, ApiError } = require("../middleware/errorHandler");
+
+const router = express.Router();
+
+/**
+ * POST /api/orders
+ * body: { seller_id, delivery_address, items: [{ product_id, quantity }] }
+ * Creates the order and its line items in one transaction, using the
+ * product's current price as price_at_order.
+ */
+router.post(
+  "/",
+  verifyToken,
+  asyncHandler(async (req, res) => {
+    const { seller_id, delivery_address, items } = req.body;
+    if (!seller_id || !Array.isArray(items) || items.length === 0) {
+      throw new ApiError(400, "seller_id और कम से कम एक item आवश्यक है");
+    }
+
+    const client = await getClient();
+    try {
+      await client.query("BEGIN");
+
+      let total = 0;
+      const lineItems = [];
+      for (const item of items) {
+        const { rows } = await client.query(
+          "SELECT id, price, stock FROM products WHERE id = $1 AND seller_id = $2 AND is_active",
+          [item.product_id, seller_id]
+        );
+        const product = rows[0];
+        if (!product) throw new ApiError(400, `Product ${item.product_id} not found in this shop`);
+        if (product.stock < item.quantity) {
+          throw new ApiError(400, `स्टॉक कम है: product ${item.product_id}`);
+        }
+        total += Number(product.price) * item.quantity;
+        lineItems.push({ product_id: product.id, quantity: item.quantity, price: product.price });
+      }
+
+      const orderResult = await client.query(
+        `INSERT INTO orders (customer_id, seller_id, total_amount, delivery_address, status)
+         VALUES ($1,$2,$3,$4,'placed') RETURNING *`,
+        [req.user.id, seller_id, total, delivery_address || null]
+      );
+      const order = orderResult.rows[0];
+
+      for (const li of lineItems) {
+        await client.query(
+          `INSERT INTO order_items (order_id, product_id, quantity, price_at_order)
+           VALUES ($1,$2,$3,$4)`,
+          [order.id, li.product_id, li.quantity, li.price]
+        );
+        await client.query("UPDATE products SET stock = stock - $1 WHERE id = $2", [
+          li.quantity,
+          li.product_id,
+        ]);
+      }
+
+      await client.query(
+        `INSERT INTO notifications (user_id, title, body, type)
+         SELECT s.user_id, 'नया ऑर्डर मिला', 'ऑर्डर #' || $1 || ' की पुष्टि करें', 'order'
+         FROM sellers s WHERE s.id = $2`,
+        [order.id, seller_id]
+      );
+
+      await client.query("COMMIT");
+      res.status(201).json({ order, items: lineItems });
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+  })
+);
+
+/** GET /api/orders?role=customer|seller — list orders for the logged-in user */
+router.get(
+  "/",
+  verifyToken,
+  asyncHandler(async (req, res) => {
+    const asSeller = req.query.role === "seller";
+    let rows;
+    if (asSeller) {
+      ({ rows } = await query(
+        `SELECT o.* FROM orders o
+         JOIN sellers s ON s.id = o.seller_id
+         WHERE s.user_id = $1 ORDER BY o.created_at DESC`,
+        [req.user.id]
+      ));
+    } else {
+      ({ rows } = await query(
+        "SELECT * FROM orders WHERE customer_id = $1 ORDER BY created_at DESC",
+        [req.user.id]
+      ));
+    }
+    res.json({ orders: rows });
+  })
+);
+
+router.get(
+  "/:id",
+  verifyToken,
+  asyncHandler(async (req, res) => {
+    const { rows } = await query("SELECT * FROM orders WHERE id = $1", [req.params.id]);
+    const order = rows[0];
+    if (!order) throw new ApiError(404, "Order not found");
+
+    const { rows: items } = await query(
+      `SELECT oi.*, p.name, p.emoji FROM order_items oi
+       JOIN products p ON p.id = oi.product_id WHERE oi.order_id = $1`,
+      [req.params.id]
+    );
+    res.json({ order, items });
+  })
+);
+
+/** PATCH /api/orders/:id/status — seller/admin updates order status */
+router.patch(
+  "/:id/status",
+  verifyToken,
+  asyncHandler(async (req, res) => {
+    const { status } = req.body;
+    const allowed = ["confirmed", "packed", "out_for_delivery", "delivered", "cancelled"];
+    if (!allowed.includes(status)) throw new ApiError(400, "अमान्य status");
+
+    const { rows: orderRows } = await query(
+      `SELECT o.*, s.user_id AS seller_user_id FROM orders o
+       JOIN sellers s ON s.id = o.seller_id WHERE o.id = $1`,
+      [req.params.id]
+    );
+    const order = orderRows[0];
+    if (!order) throw new ApiError(404, "Order not found");
+    if (order.seller_user_id !== req.user.id && req.user.role !== "admin") {
+      throw new ApiError(403, "आप इस ऑर्डर को नहीं बदल सकते");
+    }
+
+    const { rows } = await query(
+      "UPDATE orders SET status = $1 WHERE id = $2 RETURNING *",
+      [status, req.params.id]
+    );
+    await query(
+      `INSERT INTO notifications (user_id, title, body, type)
+       VALUES ($1, 'ऑर्डर अपडेट', 'आपका ऑर्डर अब: ' || $2, 'order')`,
+      [order.customer_id, status]
+    );
+    res.json({ order: rows[0] });
+  })
+);
+
+module.exports = router;

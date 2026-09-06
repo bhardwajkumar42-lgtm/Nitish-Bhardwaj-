@@ -1,0 +1,55 @@
+/**
+ * MVP OTP service.
+ *
+ * This is intentionally simple: OTPs are kept in an in-memory Map, so they
+ * are lost on server restart and won't work across multiple server
+ * instances. That's fine for a pilot on a single machine; before scaling
+ * past one server, swap this for Redis (or a `otp_requests` DB table) and
+ * plug in a real SMS gateway (MSG91 / Twilio / Gupshup are common choices
+ * for India) inside `sendOtp()` below.
+ */
+
+const otpStore = new Map(); // mobile -> { otp, expiresAt }
+
+const OTP_LENGTH = parseInt(process.env.OTP_LENGTH || "4", 10);
+const OTP_EXPIRY_MINUTES = parseInt(process.env.OTP_EXPIRY_MINUTES || "5", 10);
+
+function generateOtp() {
+  const min = Math.pow(10, OTP_LENGTH - 1);
+  const max = Math.pow(10, OTP_LENGTH) - 1;
+  return String(Math.floor(min + Math.random() * (max - min + 1)));
+}
+
+/**
+ * Generates and "sends" an OTP for a mobile number.
+ * In dev, the OTP is logged to the console and also returned to the
+ * caller so it can be surfaced in the API response for easy testing.
+ * Replace the console.log with a real SMS gateway call for production,
+ * and stop returning dev_otp once a gateway is wired up.
+ */
+async function sendOtp(mobile) {
+  const otp = generateOtp();
+  const expiresAt = Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000;
+  otpStore.set(mobile, { otp, expiresAt });
+
+  // eslint-disable-next-line no-console
+  console.log(`📲 [DEV OTP] ${mobile} -> ${otp} (expires in ${OTP_EXPIRY_MINUTES}m)`);
+
+  return { otp, expiresAt };
+}
+
+function verifyOtp(mobile, submittedOtp) {
+  const record = otpStore.get(mobile);
+  if (!record) return { ok: false, reason: "no_otp_requested" };
+  if (Date.now() > record.expiresAt) {
+    otpStore.delete(mobile);
+    return { ok: false, reason: "expired" };
+  }
+  if (record.otp !== String(submittedOtp)) {
+    return { ok: false, reason: "mismatch" };
+  }
+  otpStore.delete(mobile);
+  return { ok: true };
+}
+
+module.exports = { sendOtp, verifyOtp };

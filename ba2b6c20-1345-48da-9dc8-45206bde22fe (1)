@@ -1,0 +1,154 @@
+const express = require("express");
+const { query } = require("../db");
+const { verifyToken } = require("../middleware/auth");
+const { asyncHandler, ApiError } = require("../middleware/errorHandler");
+
+const router = express.Router();
+
+/**
+ * GET /api/providers?category=&lat=&lng=&q=
+ * Ranking follows spec section 9: nearby + available + verified + good rating.
+ * Distance uses the Haversine formula directly in SQL — good enough for an
+ * MVP; swap for PostGIS (ST_DWithin / earthdistance) once you need real
+ * spatial indexing at scale.
+ */
+router.get(
+  "/",
+  asyncHandler(async (req, res) => {
+    const { category, lat, lng, q } = req.query;
+    const conditions = ["sp.status = 'live'"];
+    const params = [];
+
+    if (category) {
+      params.push(category);
+      conditions.push(`sc.code = $${params.length}`);
+    }
+    if (q) {
+      params.push(`%${q}%`);
+      conditions.push(`sp.name ILIKE $${params.length}`);
+    }
+
+    let distanceSelect = "NULL AS distance_km";
+    let orderBy = "sp.availability = 'available' DESC, sp.is_verified DESC, sp.rating DESC";
+
+    if (lat && lng) {
+      params.push(lat, lng);
+      const latIdx = params.length - 1;
+      const lngIdx = params.length;
+      distanceSelect = `
+        (6371 * acos(
+          cos(radians($${latIdx})) * cos(radians(sp.latitude)) *
+          cos(radians(sp.longitude) - radians($${lngIdx})) +
+          sin(radians($${latIdx})) * sin(radians(sp.latitude))
+        )) AS distance_km`;
+      orderBy = `distance_km ASC NULLS LAST, sp.availability = 'available' DESC, sp.is_verified DESC, sp.rating DESC`;
+    }
+
+    const { rows } = await query(
+      `SELECT sp.*, sc.code AS category_code, sc.name_hi AS category_name, v.name AS village_name,
+              ${distanceSelect}
+       FROM service_providers sp
+       JOIN service_categories sc ON sc.id = sp.service_category_id
+       LEFT JOIN villages v ON v.id = sp.village_id
+       WHERE ${conditions.join(" AND ")}
+       ORDER BY ${orderBy}`,
+      params
+    );
+    res.json({ providers: rows });
+  })
+);
+
+/** POST /api/providers — worker registers (goes live only after admin approval) */
+router.post(
+  "/",
+  verifyToken,
+  asyncHandler(async (req, res) => {
+    const { name, category_code, village_id, experience_years, rate, rate_type, team_size, service_area_km } =
+      req.body;
+    if (!name || !category_code) throw new ApiError(400, "name और category_code आवश्यक हैं");
+
+    const { rows: catRows } = await query(
+      "SELECT id FROM service_categories WHERE code = $1",
+      [category_code]
+    );
+    if (!catRows[0]) throw new ApiError(400, "अमान्य category_code");
+
+    await query("UPDATE users SET role = 'worker' WHERE id = $1 AND role = 'customer'", [
+      req.user.id,
+    ]);
+
+    const { rows } = await query(
+      `INSERT INTO service_providers
+        (user_id, name, service_category_id, village_id, experience_years, rate, rate_type, team_size, service_area_km, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending') RETURNING *`,
+      [
+        req.user.id,
+        name,
+        catRows[0].id,
+        village_id || null,
+        experience_years || 0,
+        rate || null,
+        rate_type || "per_day",
+        team_size || 1,
+        service_area_km || 5,
+      ]
+    );
+    res.status(201).json({ provider: rows[0], message: "पंजीकरण सफल — Admin अनुमोदन का इंतज़ार है" });
+  })
+);
+
+router.get(
+  "/:id",
+  asyncHandler(async (req, res) => {
+    const { rows } = await query(
+      `SELECT sp.*, sc.name_hi AS category_name, v.name AS village_name
+       FROM service_providers sp
+       JOIN service_categories sc ON sc.id = sp.service_category_id
+       LEFT JOIN villages v ON v.id = sp.village_id
+       WHERE sp.id = $1`,
+      [req.params.id]
+    );
+    if (!rows[0]) throw new ApiError(404, "Provider not found");
+
+    const { rows: portfolio } = await query(
+      "SELECT id, image_url, caption FROM provider_portfolio WHERE provider_id = $1",
+      [req.params.id]
+    );
+    const { rows: reviews } = await query(
+      `SELECT r.rating, r.comment, r.created_at, u.name AS customer_name
+       FROM reviews r JOIN users u ON u.id = r.customer_id
+       WHERE r.provider_id = $1 ORDER BY r.created_at DESC LIMIT 20`,
+      [req.params.id]
+    );
+
+    res.json({ provider: rows[0], portfolio, reviews });
+  })
+);
+
+router.patch(
+  "/:id",
+  verifyToken,
+  asyncHandler(async (req, res) => {
+    const { rows: existing } = await query("SELECT * FROM service_providers WHERE id = $1", [
+      req.params.id,
+    ]);
+    const provider = existing[0];
+    if (!provider) throw new ApiError(404, "Provider not found");
+    if (provider.user_id !== req.user.id && req.user.role !== "admin") {
+      throw new ApiError(403, "आप केवल अपनी प्रोफाइल बदल सकते हैं");
+    }
+
+    const { rate, availability, service_area_km } = req.body;
+    const { rows } = await query(
+      `UPDATE service_providers SET
+        rate = COALESCE($1, rate),
+        availability = COALESCE($2, availability),
+        service_area_km = COALESCE($3, service_area_km)
+       WHERE id = $4 RETURNING *`,
+      [rate, availability, service_area_km, req.params.id]
+    );
+    res.json({ provider: rows[0] });
+  })
+);
+
+module.exports = router;

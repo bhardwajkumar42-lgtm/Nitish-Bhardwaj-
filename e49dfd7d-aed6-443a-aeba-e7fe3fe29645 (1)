@@ -1,0 +1,70 @@
+const express = require("express");
+const { query } = require("../db");
+const { verifyToken } = require("../middleware/auth");
+const { asyncHandler, ApiError } = require("../middleware/errorHandler");
+
+const router = express.Router();
+
+/** GET /api/chat/conversations — list conversations the user is part of */
+router.get(
+  "/conversations",
+  verifyToken,
+  asyncHandler(async (req, res) => {
+    const { rows } = await query(
+      `SELECT * FROM conversations WHERE customer_id = $1 OR provider_id = $1 ORDER BY created_at DESC`,
+      [req.user.id]
+    );
+    res.json({ conversations: rows });
+  })
+);
+
+/** POST /api/chat/conversations — get-or-create a conversation between two users */
+router.post(
+  "/conversations",
+  verifyToken,
+  asyncHandler(async (req, res) => {
+    const { other_user_id, booking_id } = req.body;
+    if (!other_user_id) throw new ApiError(400, "other_user_id आवश्यक है");
+
+    const { rows: existing } = await query(
+      `SELECT * FROM conversations
+       WHERE (customer_id = $1 AND provider_id = $2) OR (customer_id = $2 AND provider_id = $1)`,
+      [req.user.id, other_user_id]
+    );
+    if (existing[0]) return res.json({ conversation: existing[0] });
+
+    const { rows } = await query(
+      `INSERT INTO conversations (customer_id, provider_id, booking_id) VALUES ($1,$2,$3) RETURNING *`,
+      [req.user.id, other_user_id, booking_id || null]
+    );
+    res.status(201).json({ conversation: rows[0] });
+  })
+);
+
+router.get(
+  "/conversations/:id/messages",
+  verifyToken,
+  asyncHandler(async (req, res) => {
+    const { rows } = await query(
+      "SELECT * FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC",
+      [req.params.id]
+    );
+    res.json({ messages: rows });
+  })
+);
+
+router.post(
+  "/conversations/:id/messages",
+  verifyToken,
+  asyncHandler(async (req, res) => {
+    const { message } = req.body;
+    if (!message || !message.trim()) throw new ApiError(400, "message आवश्यक है");
+    const { rows } = await query(
+      `INSERT INTO messages (conversation_id, sender_id, message) VALUES ($1,$2,$3) RETURNING *`,
+      [req.params.id, req.user.id, message.trim()]
+    );
+    res.status(201).json({ message: rows[0] });
+  })
+);
+
+module.exports = router;

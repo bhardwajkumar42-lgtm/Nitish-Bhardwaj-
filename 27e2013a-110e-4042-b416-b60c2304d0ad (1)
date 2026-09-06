@@ -1,0 +1,40 @@
+const { Pool } = require("pg");
+
+if (!process.env.DATABASE_URL) {
+  // eslint-disable-next-line no-console
+  console.warn(
+    "⚠️  DATABASE_URL is not set. Copy .env.example to .env and fill it in."
+  );
+}
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+});
+
+pool.on("error", (err) => {
+  // eslint-disable-next-line no-console
+  console.error("Unexpected PostgreSQL client error", err);
+});
+
+/**
+ * Run a parameterized query.
+ * @param {string} text
+ * @param {Array<any>} params
+ */
+function query(text, params) {
+  return pool.query(text, params);
+}
+
+/**
+ * Get a client for multi-statement transactions.
+ * Usage:
+ *   const client = await getClient();
+ *   try { await client.query('BEGIN'); ... await client.query('COMMIT'); }
+ *   finally { client.release(); }
+ */
+async function getClient() {
+  const client = await pool.connect();
+  return client;
+}
+
+module.exports = { pool, query, getClient };

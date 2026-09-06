@@ -1,0 +1,122 @@
+-- =========================================================
+-- DESI MARKET — Seed data (mirrors the frontend prototype)
+-- Run via `npm run db:setup` (after schema.sql) or psql -f
+-- =========================================================
+
+-- ---------- Geography: Bihar > district > block > panchayat > villages ----------
+INSERT INTO states (id, name) VALUES (1, 'Bihar') ON CONFLICT (id) DO NOTHING;
+INSERT INTO districts (id, state_id, name) VALUES (1, 1, 'Muzaffarpur') ON CONFLICT (id) DO NOTHING;
+INSERT INTO blocks (id, district_id, name) VALUES (1, 1, 'Sample Block') ON CONFLICT (id) DO NOTHING;
+INSERT INTO panchayats (id, block_id, name) VALUES (1, 1, 'Bithauli') ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO villages (id, panchayat_id, name, latitude, longitude) VALUES
+  (1, 1, 'बिथौली', 26.1200, 85.3900),
+  (2, 1, 'डुमरी', 26.1350, 85.4050),
+  (3, 1, 'रामपुर', 26.1050, 85.3750)
+ON CONFLICT (id) DO NOTHING;
+
+-- ---------- Product categories ----------
+INSERT INTO product_categories (code, name_hi, name_en, emoji) VALUES
+  ('grocery','किराना','Grocery','🛒'),
+  ('veg','सब्ज़ी-फल','Fruits & Vegetables','🥬'),
+  ('dairy','डेयरी','Dairy','🥛'),
+  ('clothing','कपड़े','Clothing','👕'),
+  ('footwear','जूते-चप्पल','Footwear','👡'),
+  ('electronics','इलेक्ट्रॉनिक्स','Electronics','🔌'),
+  ('mobile_acc','मोबाइल एक्सेसरी','Mobile Accessories','📱'),
+  ('household','घरेलू सामान','Household','🏠'),
+  ('hardware','हार्डवेयर','Hardware','🔧'),
+  ('construction','निर्माण सामग्री','Construction Materials','🧱'),
+  ('agri','कृषि उत्पाद','Agriculture Products','🌾'),
+  ('beauty','ब्यूटी','Beauty/Personal Care','💄'),
+  ('food','खाद्य पदार्थ','Food','🍱'),
+  ('other_p','अन्य','Other','➕')
+ON CONFLICT (code) DO NOTHING;
+
+-- ---------- Service categories ----------
+INSERT INTO service_categories (code, name_hi, name_en, emoji) VALUES
+  ('raj_mistri','राज मिस्त्री','Raj Mistri','🧱'),
+  ('labour','मजदूर','Labour','⛏️'),
+  ('plumber','प्लंबर','Plumber','🚰'),
+  ('electrician','इलेक्ट्रीशियन','Electrician','💡'),
+  ('carpenter','कारपेंटर','Carpenter','🪚'),
+  ('painter','पेंटर','Painter','🎨'),
+  ('welder','वेल्डर','Welder','🔥'),
+  ('mechanic','मैकेनिक','Mechanic','🔩'),
+  ('mobile_repair','मोबाइल रिपेयर','Mobile Repair','📵'),
+  ('ac_repair','AC/फ्रिज रिपेयर','AC/Fridge Repair','❄️'),
+  ('tractor','ट्रैक्टर','Tractor','🚜'),
+  ('jcb','JCB','JCB','🏗️'),
+  ('agri_service','कृषि सेवाएँ','Agriculture Services','🌱'),
+  ('transport','ट्रांसपोर्ट','Transport','🚚'),
+  ('cleaning','सफाई','Cleaning','🧹'),
+  ('event','इवेंट सेवाएँ','Event Services','🎪'),
+  ('other_s','अन्य सेवा','Other Local Services','➕')
+ON CONFLICT (code) DO NOTHING;
+
+-- ---------- Seller users + shops ----------
+INSERT INTO users (id, mobile, name, role, village_id, is_verified, kyc_status) VALUES
+  (101, '9800000001', 'राम प्रसाद', 'seller', 1, true, 'verified'),
+  (102, '9800000002', 'सीता देवी', 'seller', 1, true, 'verified'),
+  (103, '9800000003', 'मोहन लाल', 'seller', 2, true, 'verified'),
+  (104, '9800000004', 'अनीता कुमारी', 'seller', 1, true, 'verified'),
+  (105, '9800000005', 'विजय सिंह', 'seller', 3, true, 'verified')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO sellers (id, user_id, shop_name, owner_name, village_id, opens_at, closes_at, rating, is_verified, status) VALUES
+  (1, 101, 'राम जनरल स्टोर', 'राम प्रसाद', 1, '07:00', '21:00', 4.6, true, 'live'),
+  (2, 102, 'सीता किराना भंडार', 'सीता देवी', 1, '06:30', '21:30', 4.4, true, 'live'),
+  (3, 103, 'गाँव हार्डवेयर सेंटर', 'मोहन लाल', 2, '08:00', '20:00', 4.7, true, 'live'),
+  (4, 104, 'न्यू फैशन कॉर्नर', 'अनीता कुमारी', 1, '09:00', '20:30', 4.3, true, 'live'),
+  (5, 105, 'किसान एग्रो सेंटर', 'विजय सिंह', 3, '07:00', '19:00', 4.8, true, 'live')
+ON CONFLICT (id) DO NOTHING;
+
+-- ---------- Products (category_id looked up by code via subquery) ----------
+INSERT INTO products (seller_id, category_id, name, price, unit, stock) VALUES
+  (1, (SELECT id FROM product_categories WHERE code='grocery'), 'बासमती चावल (5kg)', 420, 'पैकेट', 24),
+  (1, (SELECT id FROM product_categories WHERE code='grocery'), 'सरसों तेल (1L)', 165, 'बोतल', 40),
+  (2, (SELECT id FROM product_categories WHERE code='veg'), 'ताज़ा आलू (1kg)', 22, 'किलो', 100),
+  (2, (SELECT id FROM product_categories WHERE code='veg'), 'टमाटर (1kg)', 30, 'किलो', 60),
+  (2, (SELECT id FROM product_categories WHERE code='dairy'), 'दूध (1L)', 56, 'पैकेट', 30),
+  (3, (SELECT id FROM product_categories WHERE code='construction'), 'सीमेंट (OPC 50kg)', 410, 'बोरी', 200),
+  (3, (SELECT id FROM product_categories WHERE code='construction'), 'सरिया (TMT 8mm)', 640, 'बंडल', 50),
+  (3, (SELECT id FROM product_categories WHERE code='hardware'), 'पेंच व कील सेट', 90, 'पैकेट', 80),
+  (4, (SELECT id FROM product_categories WHERE code='clothing'), 'कॉटन कुर्ता', 399, 'पीस', 22),
+  (4, (SELECT id FROM product_categories WHERE code='clothing'), 'महिला साड़ी', 750, 'पीस', 15),
+  (5, (SELECT id FROM product_categories WHERE code='agri'), 'यूरिया खाद (45kg)', 266, 'बोरी', 70),
+  (5, (SELECT id FROM product_categories WHERE code='agri'), 'धान बीज (उन्नत किस्म)', 180, 'किलो', 35);
+
+-- ---------- Worker users + service_providers ----------
+INSERT INTO users (id, mobile, name, role, village_id, is_verified, kyc_status) VALUES
+  (201, '9811100001', 'रमेश मिस्त्री', 'worker', 1, true, 'verified'),
+  (202, '9811100002', 'सुरेश मिस्त्री', 'worker', 2, true, 'verified'),
+  (203, '9811100003', 'महेश मिस्त्री', 'worker', 3, true, 'verified'),
+  (204, '9811100004', 'अजय कुमार', 'worker', 1, true, 'verified'),
+  (205, '9811100005', 'संजय पासवान', 'worker', 2, false, 'pending'),
+  (206, '9811100006', 'दिनेश राम', 'worker', 1, true, 'verified'),
+  (207, '9811100007', 'मुन्ना कारपेंटर', 'worker', 3, true, 'verified'),
+  (208, '9811100008', 'विनोद पेंटर', 'worker', 2, true, 'verified'),
+  (209, '9811100009', 'राजू लेबर ग्रुप', 'worker', 1, true, 'verified')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO service_providers
+  (user_id, name, service_category_id, village_id, experience_years, rate, rate_type, team_size, service_area_km, availability, rating, jobs_completed, is_verified, status) VALUES
+  (201, 'रमेश मिस्त्री', (SELECT id FROM service_categories WHERE code='raj_mistri'), 1, 12, 900, 'per_day', 2, 5, 'available', 4.8, 210, true, 'live'),
+  (202, 'सुरेश मिस्त्री', (SELECT id FROM service_categories WHERE code='raj_mistri'), 2, 8, 800, 'per_day', 2, 7, 'available', 4.6, 150, true, 'live'),
+  (203, 'महेश मिस्त्री', (SELECT id FROM service_categories WHERE code='raj_mistri'), 3, 15, 1000, 'per_day', 3, 10, 'busy', 4.9, 340, true, 'live'),
+  (204, 'अजय कुमार', (SELECT id FROM service_categories WHERE code='plumber'), 1, 6, 400, 'per_visit', 1, 5, 'available', 4.5, 95, true, 'live'),
+  (205, 'संजय पासवान', (SELECT id FROM service_categories WHERE code='plumber'), 2, 10, 500, 'per_visit', 1, 8, 'unavailable', 4.7, 180, false, 'pending'),
+  (206, 'दिनेश राम', (SELECT id FROM service_categories WHERE code='electrician'), 1, 9, 450, 'per_visit', 1, 6, 'available', 4.6, 140, true, 'live'),
+  (207, 'मुन्ना कारपेंटर', (SELECT id FROM service_categories WHERE code='carpenter'), 3, 14, 850, 'per_day', 2, 9, 'available', 4.7, 220, true, 'live'),
+  (208, 'विनोद पेंटर', (SELECT id FROM service_categories WHERE code='painter'), 2, 7, 700, 'per_day', 2, 7, 'busy', 4.4, 88, true, 'live'),
+  (209, 'राजू लेबर ग्रुप', (SELECT id FROM service_categories WHERE code='labour'), 1, 5, 400, 'per_day', 4, 4, 'available', 4.3, 60, true, 'live');
+
+-- ---------- A demo customer ----------
+INSERT INTO users (id, mobile, name, role, village_id, is_verified) VALUES
+  (301, '9822200001', 'ग्राहक जी', 'customer', 1, true)
+ON CONFLICT (id) DO NOTHING;
+
+-- ---------- A demo admin ----------
+INSERT INTO users (id, mobile, name, role, is_verified) VALUES
+  (1, '9999999999', 'Admin', 'admin', true)
+ON CONFLICT (id) DO NOTHING;

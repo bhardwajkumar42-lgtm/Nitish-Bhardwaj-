@@ -1,0 +1,74 @@
+const express = require("express");
+const { query } = require("../db");
+const { asyncHandler } = require("../middleware/errorHandler");
+
+const router = express.Router();
+
+/** GET /api/panchayats — full geography tree (state > district > block > panchayat > villages) */
+router.get(
+  "/",
+  asyncHandler(async (req, res) => {
+    const { rows } = await query(`
+      SELECT p.id, p.name, b.name AS block_name, d.name AS district_name, s.name AS state_name
+      FROM panchayats p
+      JOIN blocks b ON b.id = p.block_id
+      JOIN districts d ON d.id = b.district_id
+      JOIN states s ON s.id = d.state_id
+      ORDER BY p.name
+    `);
+    res.json({ panchayats: rows });
+  })
+);
+
+/**
+ * GET /api/panchayats/:id/stats — the panchayat-wise dashboard from spec section 19:
+ * sellers, workers, customers, products, orders, bookings, revenue.
+ */
+router.get(
+  "/:id/stats",
+  asyncHandler(async (req, res) => {
+    const panchayatId = req.params.id;
+
+    const [{ rows: sellerRows }, { rows: workerRows }, { rows: customerRows }, { rows: revenueRows }] =
+      await Promise.all([
+        query(
+          `SELECT COUNT(*)::int AS count FROM sellers se
+           JOIN villages v ON v.id = se.village_id WHERE v.panchayat_id = $1`,
+          [panchayatId]
+        ),
+        query(
+          `SELECT COUNT(*)::int AS count FROM service_providers sp
+           JOIN villages v ON v.id = sp.village_id WHERE v.panchayat_id = $1`,
+          [panchayatId]
+        ),
+        query(
+          `SELECT COUNT(*)::int AS count FROM users u
+           JOIN villages v ON v.id = u.village_id WHERE v.panchayat_id = $1 AND u.role = 'customer'`,
+          [panchayatId]
+        ),
+        query(
+          `SELECT
+             COALESCE(SUM(o.total_amount) FILTER (WHERE o.status <> 'cancelled'), 0) AS product_gmv,
+             COALESCE(SUM(b.final_amount) FILTER (WHERE b.status = 'completed'), 0) AS service_gmv
+           FROM villages v
+           LEFT JOIN sellers se ON se.village_id = v.id
+           LEFT JOIN orders o ON o.seller_id = se.id
+           LEFT JOIN service_providers sp ON sp.village_id = v.id
+           LEFT JOIN bookings b ON b.provider_id = sp.id
+           WHERE v.panchayat_id = $1`,
+          [panchayatId]
+        ),
+      ]);
+
+    res.json({
+      panchayat_id: Number(panchayatId),
+      sellers: sellerRows[0].count,
+      workers: workerRows[0].count,
+      customers: customerRows[0].count,
+      product_gmv: Number(revenueRows[0].product_gmv),
+      service_gmv: Number(revenueRows[0].service_gmv),
+    });
+  })
+);
+
+module.exports = router;

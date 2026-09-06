@@ -1,0 +1,137 @@
+const express = require("express");
+const { query } = require("../db");
+const { verifyToken } = require("../middleware/auth");
+const { asyncHandler, ApiError } = require("../middleware/errorHandler");
+
+const router = express.Router();
+
+/** GET /api/products?category=&seller_id=&q= */
+router.get(
+  "/",
+  asyncHandler(async (req, res) => {
+    const { category, seller_id, q } = req.query;
+    const conditions = ["p.is_active = true"];
+    const params = [];
+
+    if (category) {
+      params.push(category);
+      conditions.push(`pc.code = $${params.length}`);
+    }
+    if (seller_id) {
+      params.push(seller_id);
+      conditions.push(`p.seller_id = $${params.length}`);
+    }
+    if (q) {
+      params.push(`%${q}%`);
+      conditions.push(`p.name ILIKE $${params.length}`);
+    }
+
+    const { rows } = await query(
+      `SELECT p.*, pc.code AS category_code, pc.name_hi AS category_name, s.shop_name, s.village_id
+       FROM products p
+       JOIN product_categories pc ON pc.id = p.category_id
+       JOIN sellers s ON s.id = p.seller_id
+       WHERE ${conditions.join(" AND ")}
+       ORDER BY p.created_at DESC`,
+      params
+    );
+    res.json({ products: rows });
+  })
+);
+
+/** POST /api/products — seller adds a product */
+router.post(
+  "/",
+  verifyToken,
+  asyncHandler(async (req, res) => {
+    const { seller_id, category_code, name, price, unit, stock, description, image_url } = req.body;
+    if (!seller_id || !name || !price) {
+      throw new ApiError(400, "seller_id, name और price आवश्यक हैं");
+    }
+
+    const { rows: sellerRows } = await query("SELECT * FROM sellers WHERE id = $1", [seller_id]);
+    const seller = sellerRows[0];
+    if (!seller) throw new ApiError(404, "Shop not found");
+    if (seller.user_id !== req.user.id && req.user.role !== "admin") {
+      throw new ApiError(403, "आप केवल अपनी दुकान में प्रोडक्ट जोड़ सकते हैं");
+    }
+
+    const { rows: catRows } = await query(
+      "SELECT id FROM product_categories WHERE code = $1",
+      [category_code]
+    );
+    if (!catRows[0]) throw new ApiError(400, "अमान्य category_code");
+
+    const { rows } = await query(
+      `INSERT INTO products (seller_id, category_id, name, description, price, unit, stock, image_url)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+      [seller_id, catRows[0].id, name, description || null, price, unit || null, stock || 0, image_url || null]
+    );
+    res.status(201).json({ product: rows[0] });
+  })
+);
+
+router.get(
+  "/:id",
+  asyncHandler(async (req, res) => {
+    const { rows } = await query(
+      `SELECT p.*, pc.name_hi AS category_name, s.shop_name, s.village_id
+       FROM products p
+       JOIN product_categories pc ON pc.id = p.category_id
+       JOIN sellers s ON s.id = p.seller_id
+       WHERE p.id = $1`,
+      [req.params.id]
+    );
+    if (!rows[0]) throw new ApiError(404, "Product not found");
+    res.json({ product: rows[0] });
+  })
+);
+
+router.patch(
+  "/:id",
+  verifyToken,
+  asyncHandler(async (req, res) => {
+    const { rows: existing } = await query(
+      `SELECT p.*, s.user_id AS seller_user_id FROM products p
+       JOIN sellers s ON s.id = p.seller_id WHERE p.id = $1`,
+      [req.params.id]
+    );
+    const product = existing[0];
+    if (!product) throw new ApiError(404, "Product not found");
+    if (product.seller_user_id !== req.user.id && req.user.role !== "admin") {
+      throw new ApiError(403, "आप केवल अपने प्रोडक्ट बदल सकते हैं");
+    }
+
+    const { name, price, stock, unit, is_active } = req.body;
+    const { rows } = await query(
+      `UPDATE products SET
+        name = COALESCE($1, name), price = COALESCE($2, price),
+        stock = COALESCE($3, stock), unit = COALESCE($4, unit),
+        is_active = COALESCE($5, is_active)
+       WHERE id = $6 RETURNING *`,
+      [name, price, stock, unit, is_active, req.params.id]
+    );
+    res.json({ product: rows[0] });
+  })
+);
+
+router.delete(
+  "/:id",
+  verifyToken,
+  asyncHandler(async (req, res) => {
+    const { rows: existing } = await query(
+      `SELECT p.*, s.user_id AS seller_user_id FROM products p
+       JOIN sellers s ON s.id = p.seller_id WHERE p.id = $1`,
+      [req.params.id]
+    );
+    const product = existing[0];
+    if (!product) throw new ApiError(404, "Product not found");
+    if (product.seller_user_id !== req.user.id && req.user.role !== "admin") {
+      throw new ApiError(403, "आप केवल अपने प्रोडक्ट हटा सकते हैं");
+    }
+    await query("UPDATE products SET is_active = false WHERE id = $1", [req.params.id]);
+    res.json({ success: true });
+  })
+);
+
+module.exports = router;

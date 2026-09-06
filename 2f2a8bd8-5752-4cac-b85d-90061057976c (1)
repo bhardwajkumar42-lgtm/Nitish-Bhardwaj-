@@ -1,0 +1,96 @@
+const express = require("express");
+const { query } = require("../db");
+const { verifyToken, requireRole } = require("../middleware/auth");
+const { asyncHandler, ApiError } = require("../middleware/errorHandler");
+
+const router = express.Router();
+
+/** GET /api/sellers?village_id=&q= — list/search shops */
+router.get(
+  "/",
+  asyncHandler(async (req, res) => {
+    const { village_id, q } = req.query;
+    const conditions = ["s.status = 'live'"];
+    const params = [];
+
+    if (village_id) {
+      params.push(village_id);
+      conditions.push(`s.village_id = $${params.length}`);
+    }
+    if (q) {
+      params.push(`%${q}%`);
+      conditions.push(`s.shop_name ILIKE $${params.length}`);
+    }
+
+    const { rows } = await query(
+      `SELECT s.*, v.name AS village_name,
+              (SELECT COUNT(*) FROM products p WHERE p.seller_id = s.id AND p.is_active) AS product_count
+       FROM sellers s
+       LEFT JOIN villages v ON v.id = s.village_id
+       WHERE ${conditions.join(" AND ")}
+       ORDER BY s.rating DESC`,
+      params
+    );
+    res.json({ sellers: rows });
+  })
+);
+
+/** POST /api/sellers — register a shop (creates it in 'pending' status, awaiting admin approval) */
+router.post(
+  "/",
+  verifyToken,
+  asyncHandler(async (req, res) => {
+    const { shop_name, owner_name, village_id, opens_at, closes_at } = req.body;
+    if (!shop_name) throw new ApiError(400, "shop_name आवश्यक है");
+
+    await query("UPDATE users SET role = 'seller' WHERE id = $1 AND role = 'customer'", [
+      req.user.id,
+    ]);
+
+    const { rows } = await query(
+      `INSERT INTO sellers (user_id, shop_name, owner_name, village_id, opens_at, closes_at, status)
+       VALUES ($1, $2, $3, $4, $5, $6, 'pending') RETURNING *`,
+      [req.user.id, shop_name, owner_name || null, village_id || null, opens_at || null, closes_at || null]
+    );
+    res.status(201).json({ seller: rows[0], message: "पंजीकरण सफल — Admin अनुमोदन का इंतज़ार है" });
+  })
+);
+
+router.get(
+  "/:id",
+  asyncHandler(async (req, res) => {
+    const { rows } = await query(
+      `SELECT s.*, v.name AS village_name FROM sellers s
+       LEFT JOIN villages v ON v.id = s.village_id WHERE s.id = $1`,
+      [req.params.id]
+    );
+    if (!rows[0]) throw new ApiError(404, "Shop not found");
+    res.json({ seller: rows[0] });
+  })
+);
+
+router.patch(
+  "/:id",
+  verifyToken,
+  asyncHandler(async (req, res) => {
+    const { rows: existingRows } = await query("SELECT * FROM sellers WHERE id = $1", [
+      req.params.id,
+    ]);
+    const seller = existingRows[0];
+    if (!seller) throw new ApiError(404, "Shop not found");
+    if (seller.user_id !== req.user.id && req.user.role !== "admin") {
+      throw new ApiError(403, "आप केवल अपनी दुकान बदल सकते हैं");
+    }
+
+    const { shop_name, opens_at, closes_at } = req.body;
+    const { rows } = await query(
+      `UPDATE sellers SET shop_name = COALESCE($1, shop_name),
+        opens_at = COALESCE($2, opens_at), closes_at = COALESCE($3, closes_at)
+       WHERE id = $4 RETURNING *`,
+      [shop_name, opens_at, closes_at, req.params.id]
+    );
+    res.json({ seller: rows[0] });
+  })
+);
+
+module.exports = router;

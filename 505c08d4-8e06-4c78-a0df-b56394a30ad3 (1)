@@ -1,0 +1,108 @@
+const express = require("express");
+const rateLimit = require("express-rate-limit");
+const { query } = require("../db");
+const { sendOtp, verifyOtp } = require("../utils/otp");
+const { signToken, verifyToken } = require("../middleware/auth");
+const { asyncHandler, ApiError } = require("../middleware/errorHandler");
+
+const router = express.Router();
+
+const otpLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000, // 10 minutes
+  max: 8, // 8 OTP requests per number/IP per window
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: true, message: "बहुत सारे OTP अनुरोध। कुछ देर बाद कोशिश करें।" },
+});
+
+function isValidMobile(mobile) {
+  return typeof mobile === "string" && /^[6-9]\d{9}$/.test(mobile);
+}
+
+/**
+ * POST /api/auth/request-otp
+ * body: { mobile }
+ */
+router.post(
+  "/request-otp",
+  otpLimiter,
+  asyncHandler(async (req, res) => {
+    const { mobile } = req.body;
+    if (!isValidMobile(mobile)) {
+      throw new ApiError(400, "मान्य 10 अंकों का मोबाइल नंबर दें");
+    }
+    const { otp, expiresAt } = await sendOtp(mobile);
+
+    const payload = { success: true, message: "OTP भेजा गया" };
+    if (process.env.NODE_ENV !== "production") {
+      // Only exposed outside production so you can test without a real SMS gateway.
+      payload.dev_otp = otp;
+      payload.expires_at = expiresAt;
+    }
+    res.json(payload);
+  })
+);
+
+/**
+ * POST /api/auth/verify-otp
+ * body: { mobile, otp, name?, role? }
+ * Creates the user on first verification, otherwise logs them in.
+ */
+router.post(
+  "/verify-otp",
+  asyncHandler(async (req, res) => {
+    const { mobile, otp, name, role } = req.body;
+    if (!isValidMobile(mobile) || !otp) {
+      throw new ApiError(400, "मोबाइल नंबर और OTP दोनों दें");
+    }
+
+    const result = verifyOtp(mobile, otp);
+    if (!result.ok) {
+      const messages = {
+        no_otp_requested: "पहले OTP भेजें",
+        expired: "OTP की समय-सीमा समाप्त हो गई, दोबारा भेजें",
+        mismatch: "गलत OTP",
+      };
+      throw new ApiError(400, messages[result.reason] || "OTP सत्यापन विफल");
+    }
+
+    const allowedRoles = ["customer", "seller", "worker", "delivery", "field_partner"];
+    const safeRole = allowedRoles.includes(role) ? role : "customer";
+
+    let { rows } = await query("SELECT * FROM users WHERE mobile = $1", [mobile]);
+    let user = rows[0];
+
+    if (!user) {
+      const insert = await query(
+        `INSERT INTO users (mobile, name, role, is_verified)
+         VALUES ($1, $2, $3, true) RETURNING *`,
+        [mobile, name || null, safeRole]
+      );
+      user = insert.rows[0];
+    } else if (!user.is_verified) {
+      const update = await query(
+        "UPDATE users SET is_verified = true WHERE id = $1 RETURNING *",
+        [user.id]
+      );
+      user = update.rows[0];
+    }
+
+    const token = signToken(user);
+    res.json({ success: true, token, user });
+  })
+);
+
+/**
+ * GET /api/auth/me — returns the logged-in user's profile.
+ */
+router.get(
+  "/me",
+  verifyToken,
+  asyncHandler(async (req, res) => {
+    const { rows } = await query("SELECT * FROM users WHERE id = $1", [req.user.id]);
+    if (!rows[0]) throw new ApiError(404, "User not found");
+    res.json({ user: rows[0] });
+  })
+);
+
+module.exports = router;
